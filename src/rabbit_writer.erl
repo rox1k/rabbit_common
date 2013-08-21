@@ -23,13 +23,12 @@
          send_command_sync/2, send_command_sync/3,
          send_command_and_notify/4, send_command_and_notify/5,
          flush/1]).
--export([internal_send_command/4, internal_send_command/6]).
 
 %% internal
 -export([mainloop/1, mainloop1/1]).
 
 -record(wstate, {sock, channel, frame_max, protocol, reader,
-                 stats_timer, pending}).
+                 stats_timer, pending, pending_size}).
 
 -define(HIBERNATE_AFTER, 5000).
 
@@ -110,7 +109,8 @@ initial_state(Sock, Channel, FrameMax, Protocol, ReaderPid, ReaderWantsStats) ->
                   frame_max = FrameMax,
                   protocol  = Protocol,
                   reader    = ReaderPid,
-                  pending   = []},
+                  pending   = [],
+                  pending_size = 0},
           #wstate.stats_timer).
 
 mainloop(State) ->
@@ -223,53 +223,43 @@ assemble_frames(Channel, MethodRecord, Content, FrameMax, Protocol) ->
                       Channel, Content, FrameMax, Protocol),
     [MethodFrame | ContentFrames].
 
-tcp_send(Sock, Data) ->
-    rabbit_misc:throw_on_error(inet_error,
-                               fun () -> rabbit_net:send(Sock, Data) end).
-
-internal_send_command(Sock, Channel, MethodRecord, Protocol) ->
-    ok = tcp_send(Sock, assemble_frame(Channel, MethodRecord, Protocol)).
-
-internal_send_command(Sock, Channel, MethodRecord, Content, FrameMax,
-                      Protocol) ->
-    ok = lists:foldl(fun (Frame,     ok) -> tcp_send(Sock, Frame);
-                         (_Frame, Other) -> Other
-                     end, ok, assemble_frames(Channel, MethodRecord,
-                                              Content, FrameMax, Protocol)).
-
 internal_send_command_async(MethodRecord,
                             State = #wstate{channel   = Channel,
                                             protocol  = Protocol,
-                                            pending   = Pending}) ->
+                                            pending   = Pending,
+                                            pending_size = PSz}) ->
     Frame = assemble_frame(Channel, MethodRecord, Protocol),
-    maybe_flush(State#wstate{pending = [Frame | Pending]}).
+    Sz = iolist_size(Frame),
+    maybe_flush(State#wstate{pending = [Frame | Pending], pending_size = PSz + Sz}).
 
 internal_send_command_async(MethodRecord, Content,
                             State = #wstate{channel   = Channel,
                                             frame_max = FrameMax,
                                             protocol  = Protocol,
-                                            pending   = Pending}) ->
+                                            pending   = Pending,
+                                            pending_size = PSz}) ->
     Frames = assemble_frames(Channel, MethodRecord, Content, FrameMax,
                              Protocol),
-    maybe_flush(State#wstate{pending = [Frames | Pending]}).
+    Sz = iolist_size(Frames),
+    maybe_flush(State#wstate{pending = [Frames | Pending], pending_size = PSz + Sz}).
 
 %% This magic number is the tcp-over-ethernet MSS (1460) minus the
 %% minimum size of a AMQP basic.deliver method frame (24) plus basic
 %% content header (22). The idea is that we want to flush just before
 %% exceeding the MSS.
--define(FLUSH_THRESHOLD, 1414).
+-define(FLUSH_THRESHOLD, 64*1024).
 
-maybe_flush(State = #wstate{pending = Pending}) ->
-    case iolist_size(Pending) >= ?FLUSH_THRESHOLD of
-        true  -> internal_flush(State);
-        false -> State
-    end.
+maybe_flush(State = #wstate{pending = Pending, pending_size = PSz})
+        when PSz >= ?FLUSH_THRESHOLD ->
+    PSz = iolist_size(Pending), % Assertion
+    internal_flush(State);
+maybe_flush(State) -> State.
 
 internal_flush(State = #wstate{pending = []}) ->
     State;
 internal_flush(State = #wstate{sock = Sock, pending = Pending}) ->
     ok = port_cmd(Sock, lists:reverse(Pending)),
-    State#wstate{pending = []}.
+    State#wstate{pending = [], pending_size = 0}.
 
 %% gen_tcp:send/2 does a selective receive of {inet_reply, Sock,
 %% Status} to obtain the result. That is bad when it is called from
