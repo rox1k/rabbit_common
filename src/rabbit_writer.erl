@@ -230,7 +230,7 @@ internal_send_command_async(MethodRecord,
                                             pending_size = PSz}) ->
     Frame = assemble_frame(Channel, MethodRecord, Protocol),
     Sz = iolist_size(Frame),
-    maybe_flush(State#wstate{pending = [Frame | Pending], pending_size = PSz + Sz}).
+    maybe_flush(State#wstate{pending = [Pending | Frame], pending_size = PSz + Sz}).
 
 internal_send_command_async(MethodRecord, Content,
                             State = #wstate{channel   = Channel,
@@ -241,7 +241,7 @@ internal_send_command_async(MethodRecord, Content,
     Frames = assemble_frames(Channel, MethodRecord, Content, FrameMax,
                              Protocol),
     Sz = iolist_size(Frames),
-    maybe_flush(State#wstate{pending = [Frames | Pending], pending_size = PSz + Sz}).
+    maybe_flush(State#wstate{pending = [Pending | Frames], pending_size = PSz + Sz}).
 
 %% This magic number is the tcp-over-ethernet MSS (1460) minus the
 %% minimum size of a AMQP basic.deliver method frame (24) plus basic
@@ -258,7 +258,7 @@ maybe_flush(State) -> State.
 internal_flush(State = #wstate{pending = []}) ->
     State;
 internal_flush(State = #wstate{sock = Sock, pending = Pending}) ->
-    ok = port_cmd(Sock, lists:reverse(Pending)),
+    ok = port_cmd(Sock, Pending),
     State#wstate{pending = [], pending_size = 0}.
 
 %% gen_tcp:send/2 does a selective receive of {inet_reply, Sock,
